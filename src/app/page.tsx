@@ -151,7 +151,6 @@ export default function InventoryPage() {
     const qScans = query(
       collection(db, 'inventory_scans'),
       where('sessionId', '==', SESSION_ID),
-      orderBy('createdAtMs', 'desc'),
       limit(5000)
     );
     const unsubScans = onSnapshot(qScans, (snap) => {
