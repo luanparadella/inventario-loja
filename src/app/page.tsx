@@ -109,7 +109,6 @@ export default function InventoryPage() {
   const [scans, setScans] = useState<ScanRecord[]>([]);
   const [uploading, setUploading] = useState(false);
 
-  // Operador e contador por nicho
   const [operatorName, setOperatorName] = useState('Operador 1');
   const [currentNiche, setCurrentNiche] = useState('Nicho A');
   const [nicheTargetInput, setNicheTargetInput] = useState('');
@@ -117,7 +116,6 @@ export default function InventoryPage() {
   const [nicheCount, setNicheCount] = useState(0);
   const [nicheHistory, setNicheHistory] = useState<NicheHistoryItem[]>([]);
 
-  // Bipagem e alertas
   const [eanInput, setEanInput] = useState('');
   const [alertMsg, setAlertMsg] = useState<{
     type: 'error' | 'warning' | 'success';
@@ -130,7 +128,6 @@ export default function InventoryPage() {
 
   const scanInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Escuta produtos esperados e bipes em tempo real
   useEffect(() => {
     const qExpected = query(
       collection(db, 'inventory_expected'),
@@ -177,14 +174,12 @@ export default function InventoryPage() {
     };
   }, []);
 
-  // Mantém foco no input de bipagem
   useEffect(() => {
     if (step === 'scan') {
       scanInputRef.current?.focus();
     }
   }, [step, nicheCount]);
 
-  // Upload e importação da planilha do ERP
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -291,7 +286,6 @@ export default function InventoryPage() {
     }
   };
 
-  // Bipagem com validação estrita EAN-13
   const handleScanSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const code = eanInput.trim();
@@ -341,7 +335,6 @@ export default function InventoryPage() {
     scanInputRef.current?.focus();
   };
 
-  // Excluir último bipe do operador atual
   const handleDeleteLastScan = async () => {
     const myLast = scans.find((s) => s.scannedBy === operatorName.trim());
     if (!myLast) {
@@ -359,7 +352,6 @@ export default function InventoryPage() {
     scanInputRef.current?.focus();
   };
 
-  // Excluir bipe individual
   const handleDeleteSingleScan = async (scan: ScanRecord) => {
     await deleteDoc(doc(db, 'inventory_scans', scan.id));
     if (
@@ -373,7 +365,6 @@ export default function InventoryPage() {
     scanInputRef.current?.focus();
   };
 
-  // Zerar contagem do nicho e avançar para o próximo
   const handleFinishAndNextNiche = () => {
     const targetNum = nicheTargetInput.trim()
       ? Math.max(0, parseInt(nicheTargetInput, 10) || 0)
@@ -471,7 +462,6 @@ export default function InventoryPage() {
     });
   }, [consolidatedReport, brandFilter, statusFilter]);
 
-  // Gerar TXT com todos os códigos bipados (um por linha, repetindo conforme bipado)
   const handleDownloadTxt = () => {
     const chronological = [...scans].reverse();
     const content = chronological.map((s) => s.ean).join('\n');
@@ -484,7 +474,6 @@ export default function InventoryPage() {
     URL.revokeObjectURL(url);
   };
 
-  // Baixar relatório Excel (.xlsx)
   const handleDownloadExcel = () => {
     const rows = consolidatedReport.map((r) => ({
       EAN: r.ean,
@@ -855,4 +844,41 @@ export default function InventoryPage() {
                     <th className="py-2.5 px-3">Referência</th>
                     <th className="py-2.5 px-3">Marca</th>
                     <th className="py-2.5 px-3 text-right">Preço</th>
-                    <th className="py-2.5 px-
+                    <th className="py-2.5 px-3 text-right">Qtd. ERP</th>
+                    <th className="py-2.5 px-3 text-right">Qtd. Bipada</th>
+                    <th className="py-2.5 px-3 text-right">Divergência</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70">
+                  {filteredReport.map((r) => (
+                    <tr key={r.ean} className="hover:bg-slate-800/30">
+                      <td className="py-2 px-3 font-mono">{r.ean}</td>
+                      <td className="py-2 px-3">{r.referencia}</td>
+                      <td className="py-2 px-3">{r.marca}</td>
+                      <td className="py-2 px-3 text-right">R$ {r.preco.toFixed(2)}</td>
+                      <td className="py-2 px-3 text-right">{r.expectedQty}</td>
+                      <td className="py-2 px-3 text-right font-semibold text-emerald-400">
+                        {r.scannedQty}
+                      </td>
+                      <td
+                        className={`py-2 px-3 text-right font-bold ${
+                          r.diff === 0
+                            ? 'text-slate-400'
+                            : r.diff < 0
+                            ? 'text-rose-400'
+                            : 'text-amber-400'
+                        }`}
+                      >
+                        {r.diff > 0 ? `+${r.diff}` : r.diff}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
