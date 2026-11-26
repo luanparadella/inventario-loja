@@ -13,7 +13,6 @@ import {
   writeBatch,
   getDocs,
   serverTimestamp,
-  orderBy,
   limit,
 } from 'firebase/firestore';
 import {
@@ -133,39 +132,57 @@ export default function InventoryPage() {
       collection(db, 'inventory_expected'),
       where('sessionId', '==', SESSION_ID)
     );
-    const unsubExpected = onSnapshot(qExpected, (snap) => {
-      const items: ExpectedProduct[] = snap.docs.map((d) => {
-        const data = d.data();
-        return {
-          id: d.id,
-          ean: String(data.ean || ''),
-          referencia: String(data.referencia || ''),
-          marca: String(data.marca || 'Sem Marca'),
-          preco: Number(data.preco || 0),
-          expectedQty: Number(data.expectedQty || 0),
-        };
-      });
-      setExpectedList(items);
-    });
+    const unsubExpected = onSnapshot(
+      qExpected,
+      (snap) => {
+        const items: ExpectedProduct[] = snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            ean: String(data.ean || ''),
+            referencia: String(data.referencia || ''),
+            marca: String(data.marca || 'Sem Marca'),
+            preco: Number(data.preco || 0),
+            expectedQty: Number(data.expectedQty || 0),
+          };
+        });
+        setExpectedList(items);
+      },
+      (err) => {
+        console.error('Erro no listener de produtos ERP:', err);
+      }
+    );
 
     const qScans = query(
       collection(db, 'inventory_scans'),
       where('sessionId', '==', SESSION_ID),
       limit(5000)
     );
-    const unsubScans = onSnapshot(qScans, (snap) => {
-      const list: ScanRecord[] = snap.docs.map((d) => {
-        const data = d.data();
-        return {
-          id: d.id,
-          ean: String(data.ean || ''),
-          scannedBy: String(data.scannedBy || ''),
-          nicheName: String(data.nicheName || 'Geral'),
-          createdAtMs: Number(data.createdAtMs || Date.now()),
-        };
-      });
-      setScans(list);
-    });
+    const unsubScans = onSnapshot(
+      qScans,
+      (snap) => {
+        const list: ScanRecord[] = snap.docs
+          .map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              ean: String(data.ean || ''),
+              scannedBy: String(data.scannedBy || ''),
+              nicheName: String(data.nicheName || 'Geral'),
+              createdAtMs: Number(data.createdAtMs || 0),
+            };
+          })
+          .sort((a, b) => b.createdAtMs - a.createdAtMs);
+        setScans(list);
+      },
+      (err) => {
+        console.error('Erro no listener de scans:', err);
+        setAlertMsg({
+          type: 'error',
+          text: `Falha ao ler bipes no Firestore: ${err.message}`,
+        });
+      }
+    );
 
     return () => {
       unsubExpected();
@@ -209,7 +226,7 @@ export default function InventoryPage() {
       const idxEan = findCol(['ean', 'codigoean', 'codigo', 'codigobarras', 'barcode'], 0);
       const idxRef = findCol(['referencia', 'ref', 'modelo', 'codigointerno'], 1);
       const idxMarca = findCol(['marca', 'brand', 'fabricante'], 2);
-      const idxPreco = findCol(['preco', 'precovenda', 'valor', 'precovenda'], 3);
+      const idxPreco = findCol(['preco', 'precovenda', 'valor'], 3);
       const idxQtd = findCol(['quantidade', 'qtd', 'estoque', 'saldodisponivel', 'qtdestoque'], 4);
 
       const consolidated = new Map<string, Omit<ExpectedProduct, 'id'>>();
@@ -325,9 +342,14 @@ export default function InventoryPage() {
               text: `EAN-13 válido (${code}) bipado, mas NÃO consta na planilha do ERP.`,
             }
       );
-    } catch (err) {
-      console.error(err);
-      setAlertMsg({ type: 'error', text: 'Erro ao salvar bipe na nuvem.' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Erro ao salvar bipe:', err);
+      playTone('error');
+      setAlertMsg({
+        type: 'error',
+        text: `Não foi possível salvar no Firestore: ${msg}`,
+      });
     }
 
     setEanInput('');
