@@ -27,6 +27,10 @@ import {
   CheckCircle2,
   Users,
   Layers,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+  ClipboardCheck,
 } from 'lucide-react';
 import { db } from '@/lib/firebase';
 
@@ -56,10 +60,14 @@ interface ScanRecord {
   createdAtMs: number;
 }
 
-interface NicheHistoryItem {
-  niche: string;
-  counted: number;
-  target: number | null;
+interface CompletedNicheRecord {
+  id: string;
+  nicheName: string;
+  completedBy: string;
+  countedScanned: number;
+  manualTarget: number | null;
+  diff: number | null;
+  completedAtMs: number;
 }
 
 const SESSION_ID = 'sessao-ativa-loja';
@@ -123,6 +131,7 @@ export default function InventoryPage() {
   const [step, setStep] = useState<'upload' | 'scan' | 'report'>('upload');
   const [expectedList, setExpectedList] = useState<ExpectedProduct[]>([]);
   const [scans, setScans] = useState<ScanRecord[]>([]);
+  const [completedNiches, setCompletedNiches] = useState<CompletedNicheRecord[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
   const [mappedInfo, setMappedInfo] = useState('');
@@ -132,17 +141,22 @@ export default function InventoryPage() {
   const [nicheTargetInput, setNicheTargetInput] = useState('');
   const [nicheTarget, setNicheTarget] = useState<number | null>(null);
   const [nicheCount, setNicheCount] = useState(0);
-  const [nicheHistory, setNicheHistory] = useState<NicheHistoryItem[]>([]);
 
   const [eanInput, setEanInput] = useState('');
   const [alertMsg, setAlertMsg] = useState<{
     type: 'error' | 'warning' | 'success';
     text: string;
   } | null>(null);
-  const [brandFilter, setBrandFilter] = useState('TODAS');
+
+  // Filtros e paginação do relatório
+  const [brandSearch, setBrandSearch] = useState('');
+  const [selectedBrand, setSelectedBrand] = useState('TODAS');
+  const [itemSearch, setItemSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<
     'all' | 'diff' | 'missing' | 'surplus' | 'ok'
   >('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
   const scanInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -215,9 +229,43 @@ export default function InventoryPage() {
       }
     );
 
+    const qNiches = query(
+      collection(db, 'inventory_niches'),
+      where('sessionId', '==', SESSION_ID),
+      limit(1000)
+    );
+    const unsubNiches = onSnapshot(
+      qNiches,
+      (snap) => {
+        const list: CompletedNicheRecord[] = snap.docs
+          .map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              nicheName: String(data.nicheName || 'Nicho'),
+              completedBy: String(data.completedBy || 'Operador'),
+              countedScanned: Number(data.countedScanned || 0),
+              manualTarget:
+                data.manualTarget === null || data.manualTarget === undefined
+                  ? null
+                  : Number(data.manualTarget),
+              diff:
+                data.diff === null || data.diff === undefined ? null : Number(data.diff),
+              completedAtMs: Number(data.completedAtMs || 0),
+            };
+          })
+          .sort((a, b) => b.completedAtMs - a.completedAtMs);
+        setCompletedNiches(list);
+      },
+      (err) => {
+        console.error('Erro no listener de nichos:', err);
+      }
+    );
+
     return () => {
       unsubExpected();
       unsubScans();
+      unsubNiches();
     };
   }, []);
 
@@ -226,6 +274,11 @@ export default function InventoryPage() {
       scanInputRef.current?.focus();
     }
   }, [step, nicheCount]);
+
+  // Reseta para página 1 sempre que os filtros mudarem
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [brandSearch, selectedBrand, itemSearch, statusFilter, pageSize]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -492,27 +545,46 @@ export default function InventoryPage() {
     scanInputRef.current?.focus();
   };
 
-  const handleFinishAndNextNiche = () => {
+  const handleFinishAndNextNiche = async () => {
+    const nicheLabel = (currentNiche || 'Nicho sem nome').trim();
+    const actor = (operatorName || 'Operador').trim();
     const targetNum = nicheTargetInput.trim()
       ? Math.max(0, parseInt(nicheTargetInput, 10) || 0)
       : nicheTarget;
+
     if (targetNum !== null && nicheCount !== targetNum) {
       const diff = nicheCount - targetNum;
       const ok = window.confirm(
-        `No ${currentNiche} você contou ${targetNum} itens e bipou ${nicheCount} (diferença de ${
+        `No ${nicheLabel} você contou ${targetNum} itens e bipou ${nicheCount} (diferença de ${
           diff > 0 ? `+${diff}` : diff
-        }). Deseja fechar este nicho e zerar mesmo assim?`
+        }). Deseja fechar este nicho e salvar mesmo assim?`
       );
       if (!ok) return;
     }
 
-    setNicheHistory((prev) => [
-      { niche: currentNiche, counted: nicheCount, target: targetNum },
-      ...prev,
-    ]);
+    const completedAtMs = Date.now();
+    const diffVal = targetNum !== null ? nicheCount - targetNum : null;
 
-    const trimmed = currentNiche.trim();
-    const matchLetter = trimmed.match(/^(.*?)([A-Za-z])$/);
+    try {
+      await addDoc(collection(db, 'inventory_niches'), {
+        sessionId: SESSION_ID,
+        nicheName: nicheLabel,
+        completedBy: actor,
+        countedScanned: nicheCount,
+        manualTarget: targetNum,
+        diff: diffVal,
+        completedAtMs,
+        completedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      console.error('Erro ao salvar nicho concluído:', err);
+      setAlertMsg({
+        type: 'error',
+        text: 'Atenção: o nicho avançou na tela, mas houve falha ao gravar o registro na nuvem.',
+      });
+    }
+
+    const matchLetter = nicheLabel.match(/^(.*?)([A-Za-z])$/);
     if (matchLetter) {
       const prefix = matchLetter[1];
       const charCode = matchLetter[2].charCodeAt(0);
@@ -620,21 +692,50 @@ export default function InventoryPage() {
     });
   }, [expectedList, scans, scanCountByNormCode]);
 
-  const brands = useMemo(() => {
+  const allBrands = useMemo(() => {
     const set = new Set(consolidatedReport.map((r) => r.marca));
-    return ['TODAS', ...Array.from(set).sort()];
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [consolidatedReport]);
 
+  const searchableBrands = useMemo(() => {
+    const q = brandSearch.trim().toLowerCase();
+    if (!q) return allBrands;
+    return allBrands.filter((b) => b.toLowerCase().includes(q));
+  }, [allBrands, brandSearch]);
+
   const filteredReport = useMemo(() => {
+    const bQuery = brandSearch.trim().toLowerCase();
+    const iQuery = itemSearch.trim().toLowerCase();
+
     return consolidatedReport.filter((r) => {
-      if (brandFilter !== 'TODAS' && r.marca !== brandFilter) return false;
+      if (selectedBrand !== 'TODAS' && r.marca !== selectedBrand) return false;
+      if (bQuery && !r.marca.toLowerCase().includes(bQuery)) return false;
+
+      if (iQuery) {
+        const matchCode =
+          r.codigoInterno.toLowerCase().includes(iQuery) ||
+          normalizeCode(r.codigoInterno).toLowerCase().includes(iQuery) ||
+          r.ean.toLowerCase().includes(iQuery) ||
+          normalizeCode(r.ean).toLowerCase().includes(iQuery) ||
+          r.referencia.toLowerCase().includes(iQuery);
+        if (!matchCode) return false;
+      }
+
       if (statusFilter === 'diff') return r.diff !== 0;
       if (statusFilter === 'missing') return r.diff < 0;
       if (statusFilter === 'surplus') return r.diff > 0;
       if (statusFilter === 'ok') return r.diff === 0 && r.expectedQty > 0;
       return true;
     });
-  }, [consolidatedReport, brandFilter, statusFilter]);
+  }, [consolidatedReport, selectedBrand, brandSearch, itemSearch, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredReport.length / pageSize));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+
+  const paginatedReport = useMemo(() => {
+    const startIdx = (safeCurrentPage - 1) * pageSize;
+    return filteredReport.slice(startIdx, startIdx + pageSize);
+  }, [filteredReport, safeCurrentPage, pageSize]);
 
   const handleDownloadTxt = () => {
     const chronological = [...scans].reverse();
@@ -649,7 +750,7 @@ export default function InventoryPage() {
   };
 
   const handleDownloadExcel = () => {
-    const rows = consolidatedReport.map((r) => ({
+    const rows = filteredReport.map((r) => ({
       Codigo_Interno: r.codigoInterno,
       EAN: r.ean,
       Referencia: r.referencia,
@@ -666,6 +767,21 @@ export default function InventoryPage() {
     XLSX.writeFile(wb, `relatorio-inventario-${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
+  const handleDownloadNichesExcel = () => {
+    const rows = completedNiches.map((n) => ({
+      Nicho: n.nicheName,
+      Responsavel: n.completedBy,
+      Bipados: n.countedScanned,
+      Contado_Manual: n.manualTarget ?? '',
+      Diferenca: n.diff ?? '',
+      Data_Hora: new Date(n.completedAtMs).toLocaleString('pt-BR'),
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Nichos_Concluidos');
+    XLSX.writeFile(wb, `nichos-concluidos-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -675,7 +791,7 @@ export default function InventoryPage() {
               Inventário de Loja — Colaborativo Online
             </h1>
             <p className="text-sm text-slate-400">
-              Carga ERP, bipagem EAN-13 ao vivo, contagem por nicho, divergências e exportação TXT.
+              Carga ERP, bipagem ao vivo, controle por nicho, relatório paginado e exportação TXT.
             </p>
           </div>
 
@@ -715,13 +831,16 @@ export default function InventoryPage() {
 
         <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-            <div className="flex items-center gap-4">
+            <div className="flex flex-wrap items-center gap-4">
               <span>
                 Produtos na Lista ERP: <strong className="text-white">{expectedList.length}</strong> SKUs /{' '}
                 <strong className="text-white">{totalExpectedQty}</strong> un.
               </span>
               <span>
                 Total Bipado (Equipe): <strong className="text-emerald-400">{totalScannedQty}</strong> un.
+              </span>
+              <span>
+                Nichos Concluídos: <strong className="text-sky-400">{completedNiches.length}</strong>
               </span>
             </div>
             <span className="font-semibold text-emerald-400">{progressPct.toFixed(1)}%</span>
@@ -762,7 +881,7 @@ export default function InventoryPage() {
             <h2 className="text-xl font-semibold">Passo 1: Enviar Planilha de Produtos do ERP</h2>
             <p className="text-sm text-slate-400 max-w-xl mx-auto">
               Selecione o arquivo (.xlsx ou .csv) contendo Referência/Modelo, Marca, CodigoInterno, SaldoDisponivel,
-              Preço Venda e Código EAN. Os itens são enviados em blocos compactos para o Firestore.
+              Preço Venda e Código EAN.
             </p>
 
             {uploadProgress && (
@@ -936,15 +1055,19 @@ export default function InventoryPage() {
                 Zerar e Próximo Nicho
               </button>
 
-              {nicheHistory.length > 0 && (
+              {completedNiches.length > 0 && (
                 <div className="border-t border-slate-800 pt-3 space-y-2">
-                  <p className="text-xs font-semibold text-slate-400">Nichos concluídos por você</p>
-                  <ul className="space-y-1.5 text-xs">
-                    {nicheHistory.map((h, idx) => (
-                      <li key={idx} className="flex justify-between text-slate-300">
-                        <span>{h.niche}</span>
-                        <span>
-                          {h.counted} bipados {h.target !== null ? `(contado: ${h.target})` : ''}
+                  <p className="text-xs font-semibold text-slate-400">
+                    Nichos concluídos (sincronizado)
+                  </p>
+                  <ul className="space-y-1.5 text-xs max-h-48 overflow-y-auto">
+                    {completedNiches.slice(0, 15).map((h) => (
+                      <li key={h.id} className="flex justify-between gap-2 text-slate-300">
+                        <span className="truncate">
+                          <strong className="text-white">{h.nicheName}</strong> • {h.completedBy}
+                        </span>
+                        <span className="shrink-0 text-emerald-400 font-medium">
+                          {h.countedScanned} un.
                         </span>
                       </li>
                     ))}
@@ -956,109 +1079,296 @@ export default function InventoryPage() {
         )}
 
         {step === 'report' && (
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold text-white">
-                  Relatório de Inventário e Divergências
-                </h2>
-                <p className="text-sm text-slate-400">
-                  Total de linhas bipadas no TXT:{' '}
-                  <strong className="text-emerald-400">{scans.length}</strong>
-                </p>
+          <div className="space-y-6">
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-semibold text-white">
+                    Relatório de Inventário e Divergências
+                  </h2>
+                  <p className="text-sm text-slate-400">
+                    Total de linhas bipadas no TXT:{' '}
+                    <strong className="text-emerald-400">{scans.length}</strong> • Itens filtrados:{' '}
+                    <strong className="text-white">{filteredReport.length}</strong>
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDownloadTxt}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition"
+                  >
+                    <FileText className="w-4 h-4" />
+                    Baixar TXT (Códigos Bipados)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadExcel}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    Baixar Relatório (.xlsx)
+                  </button>
+                </div>
               </div>
 
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={handleDownloadTxt}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition"
-                >
-                  <FileText className="w-4 h-4" />
-                  Baixar TXT (Códigos Bipados)
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDownloadExcel}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition"
-                >
-                  <FileSpreadsheet className="w-4 h-4" />
-                  Baixar Relatório (.xlsx)
-                </button>
-              </div>
-            </div>
+              {/* Filtros com busca de marca, seleção de marca, busca de código/referência e status */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={brandSearch}
+                    onChange={(e) => {
+                      setBrandSearch(e.target.value);
+                      if (selectedBrand !== 'TODAS') setSelectedBrand('TODAS');
+                    }}
+                    placeholder="Pesquisar marca..."
+                    className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white outline-none focus:border-emerald-500"
+                  />
+                </div>
 
-            <div className="flex flex-wrap gap-3">
-              <select
-                value={brandFilter}
-                onChange={(e) => setBrandFilter(e.target.value)}
-                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
-              >
-                {brands.map((b) => (
-                  <option key={b} value={b}>
-                    Marca: {b}
+                <select
+                  value={selectedBrand}
+                  onChange={(e) => setSelectedBrand(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-emerald-500"
+                >
+                  <option value="TODAS">
+                    Todas as marcas ({searchableBrands.length})
                   </option>
-                ))}
-              </select>
-
-              <select
-                value={statusFilter}
-                onChange={(e) =>
-                  setStatusFilter(e.target.value as 'all' | 'diff' | 'missing' | 'surplus' | 'ok')
-                }
-                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
-              >
-                <option value="all">Todos os itens</option>
-                <option value="diff">Com divergência</option>
-                <option value="missing">Faltando no físico (Bipado &lt; ERP)</option>
-                <option value="surplus">Sobrando no físico (Bipado &gt; ERP)</option>
-                <option value="ok">Conferidos (Sem diferença)</option>
-              </select>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-400">
-                    <th className="py-2.5 px-3">Cód. Interno</th>
-                    <th className="py-2.5 px-3">EAN</th>
-                    <th className="py-2.5 px-3">Referência</th>
-                    <th className="py-2.5 px-3">Marca</th>
-                    <th className="py-2.5 px-3 text-right">Preço</th>
-                    <th className="py-2.5 px-3 text-right">Qtd. ERP</th>
-                    <th className="py-2.5 px-3 text-right">Qtd. Bipada</th>
-                    <th className="py-2.5 px-3 text-right">Divergência</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/70">
-                  {filteredReport.slice(0, 200).map((r) => (
-                    <tr key={r.key} className="hover:bg-slate-800/30">
-                      <td className="py-2 px-3 font-mono text-xs text-slate-300">{r.codigoInterno}</td>
-                      <td className="py-2 px-3 font-mono">{r.ean || '-'}</td>
-                      <td className="py-2 px-3">{r.referencia}</td>
-                      <td className="py-2 px-3">{r.marca}</td>
-                      <td className="py-2 px-3 text-right">R$ {r.preco.toFixed(2)}</td>
-                      <td className="py-2 px-3 text-right">{r.expectedQty}</td>
-                      <td className="py-2 px-3 text-right font-semibold text-emerald-400">
-                        {r.scannedQty}
-                      </td>
-                      <td
-                        className={`py-2 px-3 text-right font-bold ${
-                          r.diff === 0
-                            ? 'text-slate-400'
-                            : r.diff < 0
-                            ? 'text-rose-400'
-                            : 'text-amber-400'
-                        }`}
-                      >
-                        {r.diff > 0 ? `+${r.diff}` : r.diff}
-                      </td>
-                    </tr>
+                  {searchableBrands.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
+                </select>
+
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={itemSearch}
+                    onChange={(e) => setItemSearch(e.target.value)}
+                    placeholder="Buscar código ou referência..."
+                    className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <select
+                  value={statusFilter}
+                  onChange={(e) =>
+                    setStatusFilter(e.target.value as 'all' | 'diff' | 'missing' | 'surplus' | 'ok')
+                  }
+                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-emerald-500"
+                >
+                  <option value="all">Todos os itens</option>
+                  <option value="diff">Com divergência</option>
+                  <option value="missing">Faltando no físico (Bipado &lt; ERP)</option>
+                  <option value="surplus">Sobrando no físico (Bipado &gt; ERP)</option>
+                  <option value="ok">Conferidos (Sem diferença)</option>
+                </select>
+              </div>
+
+              {/* Barra superior de paginação */}
+              <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400 border-y border-slate-800 py-3">
+                <div className="flex items-center gap-2">
+                  <span>Exibir</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => setPageSize(Number(e.target.value))}
+                    className="bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-white"
+                  >
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                  <span>
+                    por página • Página <strong className="text-white">{safeCurrentPage}</strong> de{' '}
+                    <strong className="text-white">{totalPages}</strong>
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage <= 1}
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-white font-medium transition"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    Anterior
+                  </button>
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage >= totalPages}
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-white font-medium transition"
+                  >
+                    Próxima
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400">
+                      <th className="py-2.5 px-3">Cód. Interno</th>
+                      <th className="py-2.5 px-3">EAN</th>
+                      <th className="py-2.5 px-3">Referência</th>
+                      <th className="py-2.5 px-3">Marca</th>
+                      <th className="py-2.5 px-3 text-right">Preço</th>
+                      <th className="py-2.5 px-3 text-right">Qtd. ERP</th>
+                      <th className="py-2.5 px-3 text-right">Qtd. Bipada</th>
+                      <th className="py-2.5 px-3 text-right">Divergência</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70">
+                    {paginatedReport.map((r) => (
+                      <tr key={r.key} className="hover:bg-slate-800/30">
+                        <td className="py-2 px-3 font-mono text-xs text-slate-300">
+                          {r.codigoInterno}
+                        </td>
+                        <td className="py-2 px-3 font-mono">{r.ean || '-'}</td>
+                        <td className="py-2 px-3">{r.referencia}</td>
+                        <td className="py-2 px-3">{r.marca}</td>
+                        <td className="py-2 px-3 text-right">R$ {r.preco.toFixed(2)}</td>
+                        <td className="py-2 px-3 text-right">{r.expectedQty}</td>
+                        <td className="py-2 px-3 text-right font-semibold text-emerald-400">
+                          {r.scannedQty}
+                        </td>
+                        <td
+                          className={`py-2 px-3 text-right font-bold ${
+                            r.diff === 0
+                              ? 'text-slate-400'
+                              : r.diff < 0
+                              ? 'text-rose-400'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {r.diff > 0 ? `+${r.diff}` : r.diff}
+                        </td>
+                      </tr>
+                    ))}
+                    {paginatedReport.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="py-8 text-center text-slate-500">
+                          Nenhum item encontrado para os filtros selecionados.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Barra inferior de paginação */}
+              <div className="flex items-center justify-between text-xs text-slate-400 pt-2">
+                <span>
+                  Mostrando {paginatedReport.length} de {filteredReport.length} itens
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage <= 1}
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-white font-medium transition"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    Anterior
+                  </button>
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage >= totalPages}
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-white font-medium transition"
+                  >
+                    Próxima
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            {/* Histórico de Nichos Concluídos */}
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <ClipboardCheck className="w-5 h-5 text-sky-400" />
+                  <div>
+                    <h3 className="text-lg font-semibold text-white">
+                      Nichos Concluídos pela Equipe
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Registro automático de quem fechou cada nicho, quantidades e data/hora.
+                    </p>
+                  </div>
+                </div>
+
+                {completedNiches.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleDownloadNichesExcel}
+                    className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition self-start sm:self-auto"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    Exportar Nichos (.xlsx)
+                  </button>
+                )}
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400">
+                      <th className="py-2.5 px-3">Nicho</th>
+                      <th className="py-2.5 px-3">Quem Concluiu</th>
+                      <th className="py-2.5 px-3 text-right">Bipados</th>
+                      <th className="py-2.5 px-3 text-right">Contado Manual</th>
+                      <th className="py-2.5 px-3 text-right">Diferença</th>
+                      <th className="py-2.5 px-3 text-right">Concluído em</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70">
+                    {completedNiches.map((n) => (
+                      <tr key={n.id} className="hover:bg-slate-800/30">
+                        <td className="py-2 px-3 font-semibold text-white">{n.nicheName}</td>
+                        <td className="py-2 px-3 text-slate-300">{n.completedBy}</td>
+                        <td className="py-2 px-3 text-right font-semibold text-emerald-400">
+                          {n.countedScanned}
+                        </td>
+                        <td className="py-2 px-3 text-right text-slate-300">
+                          {n.manualTarget !== null ? n.manualTarget : '-'}
+                        </td>
+                        <td
+                          className={`py-2 px-3 text-right font-bold ${
+                            n.diff === null
+                              ? 'text-slate-500'
+                              : n.diff === 0
+                              ? 'text-emerald-400'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {n.diff === null ? '-' : n.diff > 0 ? `+${n.diff}` : n.diff}
+                        </td>
+                        <td className="py-2 px-3 text-right text-xs text-slate-400">
+                          {new Date(n.completedAtMs).toLocaleString('pt-BR')}
+                        </td>
+                      </tr>
+                    ))}
+                    {completedNiches.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="py-6 text-center text-slate-500 text-sm">
+                          Nenhum nicho concluído ainda.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
         )}
       </div>
     </div>
