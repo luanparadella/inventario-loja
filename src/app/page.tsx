@@ -546,17 +546,40 @@ export default function InventoryPage() {
   };
 
   const handleDeleteCompletedNiche = async (nicheId: string, nicheName: string) => {
+    const cleanNiche = nicheName.trim();
+    const scansToDelete = scans.filter(
+      (s) => (s.nicheName || 'Geral').trim() === cleanNiche
+    );
+
+    const ok = window.confirm(
+      `Excluir o nicho "${cleanNiche}" também removerá ${scansToDelete.length} código(s) bipado(s) desse nicho e reduzirá o total do relatório. Deseja continuar?`
+    );
+    if (!ok) return;
+
     try {
+      for (let i = 0; i < scansToDelete.length; i += 400) {
+        const batch = writeBatch(db);
+        scansToDelete.slice(i, i + 400).forEach((s) => {
+          batch.delete(doc(db, 'inventory_scans', s.id));
+        });
+        await batch.commit();
+      }
+
       await deleteDoc(doc(db, 'inventory_niches', nicheId));
+
+      if (currentNiche.trim() === cleanNiche) {
+        setNicheCount(0);
+      }
+
       setAlertMsg({
         type: 'success',
-        text: `Registro do nicho "${nicheName}" removido.`,
+        text: `Nicho "${cleanNiche}" e ${scansToDelete.length} código(s) bipado(s) removidos. Relatório atualizado.`,
       });
     } catch (err) {
-      console.error('Erro ao excluir nicho concluído:', err);
+      console.error('Erro ao excluir nicho e bipes:', err);
       setAlertMsg({
         type: 'error',
-        text: 'Erro ao remover o registro do nicho concluído.',
+        text: 'Erro ao excluir o nicho e seus bipes no Firestore.',
       });
     }
   };
@@ -1405,7 +1428,7 @@ export default function InventoryPage() {
                             <button
                               type="button"
                               onClick={() => handleDeleteCompletedNiche(n.id, n.nicheName)}
-                              title="Excluir registro deste nicho"
+                              title="Excluir nicho e seus códigos bipados"
                               className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-950/50 transition"
                             >
                               <Trash2 className="w-4 h-4" />
