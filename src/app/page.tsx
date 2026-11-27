@@ -74,6 +74,12 @@ function normalizeHeader(h: string) {
     .replace(/[^a-z0-9]/g, '');
 }
 
+function normalizeCode(val: string) {
+  const cleaned = String(val || '').trim();
+  const withoutZeros = cleaned.replace(/^0+/, '');
+  return withoutZeros || (cleaned ? '0' : '');
+}
+
 function parseNumberBR(val: unknown): number {
   if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
   const cleaned = String(val || '')
@@ -298,7 +304,7 @@ export default function InventoryPage() {
 
         const codigoInterno = String(row[idxInterno] ?? '').replace(/\s+/g, '').trim();
         const ean = String(row[idxEan] ?? '').replace(/\s+/g, '').trim();
-        const key = codigoInterno || ean || `linha_${i + 1}`;
+        const key = normalizeCode(codigoInterno) || normalizeCode(ean) || `linha_${i + 1}`;
 
         const referencia = String(row[idxRef] ?? '').trim();
         const marca = String(row[idxMarca] ?? '').trim() || 'Sem Marca';
@@ -311,6 +317,7 @@ export default function InventoryPage() {
             ...prev,
             expectedQty: prev.expectedQty + qty,
             ean: prev.ean || ean,
+            codigoInterno: prev.codigoInterno || codigoInterno,
             referencia: prev.referencia || referencia,
             marca: prev.marca !== 'Sem Marca' ? prev.marca : marca,
             preco: prev.preco || preco,
@@ -397,18 +404,24 @@ export default function InventoryPage() {
     const code = eanInput.trim();
     if (!code) return;
 
-    if (!/^\d{12,13}$/.test(code)) {
+    if (!/^\d{1,13}$/.test(code)) {
       playTone('error');
       setAlertMsg({
         type: 'error',
-        text: `Código inválido ("${code}")! O código deve conter 12 ou 13 dígitos numéricos. Não foi contabilizado.`,
+        text: `Código inválido ("${code}")! Informe apenas dígitos numéricos (até 13 caracteres). Não foi contabilizado.`,
       });
       setEanInput('');
       scanInputRef.current?.focus();
       return;
     }
 
-    const existsInErp = expectedList.some((p) => p.ean === code);
+    const normalizedCode = normalizeCode(code);
+    const existsInErp = expectedList.some(
+      (p) =>
+        normalizeCode(p.ean) === normalizedCode ||
+        normalizeCode(p.codigoInterno) === normalizedCode
+    );
+
     const createdAtMs = Date.now();
     const nicheLabel = (currentNiche || 'Geral').trim();
 
@@ -426,10 +439,13 @@ export default function InventoryPage() {
       playTone('ok');
       setAlertMsg(
         existsInErp
-          ? { type: 'success', text: `Bipado EAN ${code} em ${nicheLabel}.` }
+          ? {
+              type: 'success',
+              text: `Bipado código ${code} (ref. ${normalizedCode}) em ${nicheLabel}.`,
+            }
           : {
               type: 'warning',
-              text: `EAN-13 válido (${code}) bipado, mas NÃO consta na planilha do ERP.`,
+              text: `Código válido (${code} / ref. ${normalizedCode}) bipado, mas NÃO consta na planilha do ERP.`,
             }
       );
     } catch (err: unknown) {
@@ -521,10 +537,12 @@ export default function InventoryPage() {
   const progressPct =
     totalExpectedQty > 0 ? Math.min(100, (totalScannedQty / totalExpectedQty) * 100) : 0;
 
-  const scanCountByEan = useMemo(() => {
+  const scanCountByNormCode = useMemo(() => {
     const map = new Map<string, number>();
     for (const s of scans) {
-      map.set(s.ean, (map.get(s.ean) || 0) + 1);
+      const key = normalizeCode(s.ean);
+      if (!key) continue;
+      map.set(key, (map.get(key) || 0) + 1);
     }
     return map;
   }, [scans]);
@@ -545,13 +563,20 @@ export default function InventoryPage() {
     >();
 
     for (const exp of expectedList) {
-      const key = exp.codigoInterno || exp.ean || `${exp.referencia}_${exp.marca}`;
+      const normInterno = normalizeCode(exp.codigoInterno);
+      const normEan = normalizeCode(exp.ean);
+      const key = normInterno || normEan || `${exp.referencia}_${exp.marca}`;
+
       const existing = map.get(key);
       if (existing) {
         existing.expectedQty += exp.expectedQty;
         if (!existing.ean && exp.ean) existing.ean = exp.ean;
+        if (!existing.codigoInterno && exp.codigoInterno) existing.codigoInterno = exp.codigoInterno;
       } else {
-        const scannedQty = exp.ean ? scanCountByEan.get(exp.ean) || 0 : 0;
+        const scannedQty =
+          (normInterno ? scanCountByNormCode.get(normInterno) || 0 : 0) +
+          (normEan && normEan !== normInterno ? scanCountByNormCode.get(normEan) || 0 : 0);
+
         map.set(key, {
           key,
           ean: exp.ean,
@@ -565,12 +590,16 @@ export default function InventoryPage() {
       }
     }
 
-    for (const [ean, scannedQty] of scanCountByEan.entries()) {
-      const alreadyMatched = Array.from(map.values()).some((item) => item.ean === ean);
+    for (const [normCode, scannedQty] of scanCountByNormCode.entries()) {
+      const alreadyMatched = Array.from(map.values()).some(
+        (item) =>
+          normalizeCode(item.codigoInterno) === normCode || normalizeCode(item.ean) === normCode
+      );
       if (!alreadyMatched) {
-        map.set(`unlisted_${ean}`, {
-          key: `unlisted_${ean}`,
-          ean,
+        const originalSample = scans.find((s) => normalizeCode(s.ean) === normCode)?.ean || normCode;
+        map.set(`unlisted_${normCode}`, {
+          key: `unlisted_${normCode}`,
+          ean: originalSample,
           codigoInterno: '-',
           referencia: 'NÃO CADASTRADO NO ERP',
           marca: 'Sem Marca',
@@ -589,7 +618,7 @@ export default function InventoryPage() {
         financialDiff: diff * r.preco,
       };
     });
-  }, [expectedList, scanCountByEan]);
+  }, [expectedList, scans, scanCountByNormCode]);
 
   const brands = useMemo(() => {
     const set = new Set(consolidatedReport.map((r) => r.marca));
@@ -786,7 +815,7 @@ export default function InventoryPage() {
 
                 <form onSubmit={handleScanSubmit} className="space-y-3">
                   <label className="block text-sm font-medium text-slate-300">
-                    Bipar ou digitar código EAN-13
+                    Bipar ou digitar código EAN-13 / Código Interno
                   </label>
                   <div className="flex gap-2">
                     <div className="relative flex-1">
@@ -796,7 +825,7 @@ export default function InventoryPage() {
                         type="text"
                         value={eanInput}
                         onChange={(e) => setEanInput(e.target.value)}
-                        placeholder="Ex: 7891234567890"
+                        placeholder="Ex: 7891234567890 ou 1671216"
                         autoFocus
                         className="w-full pl-11 pr-4 py-3 bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl text-white text-lg tracking-wider outline-none"
                       />
