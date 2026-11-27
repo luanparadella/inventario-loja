@@ -7,6 +7,7 @@ import {
   addDoc,
   deleteDoc,
   doc,
+  setDoc,
   onSnapshot,
   query,
   where,
@@ -31,7 +32,6 @@ import {
 import { db } from '@/lib/firebase';
 
 interface ExpectedProduct {
-  id: string;
   ean: string;
   referencia: string;
   marca: string;
@@ -54,6 +54,7 @@ interface NicheHistoryItem {
 }
 
 const SESSION_ID = 'sessao-ativa-loja';
+const CHUNK_SIZE = 500;
 
 function normalizeHeader(h: string) {
   return String(h || '')
@@ -107,6 +108,8 @@ export default function InventoryPage() {
   const [expectedList, setExpectedList] = useState<ExpectedProduct[]>([]);
   const [scans, setScans] = useState<ScanRecord[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
+  const [mappedInfo, setMappedInfo] = useState('');
 
   const [operatorName, setOperatorName] = useState('Operador 1');
   const [currentNiche, setCurrentNiche] = useState('Nicho A');
@@ -128,28 +131,33 @@ export default function InventoryPage() {
   const scanInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    const qExpected = query(
-      collection(db, 'inventory_expected'),
+    const qBlocks = query(
+      collection(db, 'inventory_expected_blocks'),
       where('sessionId', '==', SESSION_ID)
     );
     const unsubExpected = onSnapshot(
-      qExpected,
+      qBlocks,
       (snap) => {
-        const items: ExpectedProduct[] = snap.docs.map((d) => {
+        const blocks: { blockIndex: number; items: ExpectedProduct[] }[] = [];
+        snap.docs.forEach((d) => {
           const data = d.data();
-          return {
-            id: d.id,
-            ean: String(data.ean || ''),
-            referencia: String(data.referencia || ''),
-            marca: String(data.marca || 'Sem Marca'),
-            preco: Number(data.preco || 0),
-            expectedQty: Number(data.expectedQty || 0),
-          };
+          if (Array.isArray(data.items)) {
+            blocks.push({
+              blockIndex: Number(data.blockIndex ?? 0),
+              items: data.items as ExpectedProduct[],
+            });
+          }
         });
-        setExpectedList(items);
+        blocks.sort((a, b) => a.blockIndex - b.blockIndex);
+        const flat = blocks.flatMap((b) => b.items);
+        setExpectedList(flat);
       },
       (err) => {
-        console.error('Erro no listener de produtos ERP:', err);
+        console.error('Erro no listener de blocos ERP:', err);
+        setAlertMsg({
+          type: 'error',
+          text: `Erro ao ler base ERP no Firestore: ${err.message}`,
+        });
       }
     );
 
@@ -200,6 +208,7 @@ export default function InventoryPage() {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploading(true);
+    setUploadProgress('Lendo arquivo da planilha...');
     setAlertMsg(null);
 
     try {
@@ -218,18 +227,49 @@ export default function InventoryPage() {
       }
 
       const headers = aoa[0].map((h, idx) => String(h || '').trim() || `Col_${idx + 1}`);
-      const findCol = (candidates: string[], fallbackIdx: number) => {
-        const found = headers.find((h) => candidates.includes(normalizeHeader(h)));
-        return found ? headers.indexOf(found) : fallbackIdx;
+      const normHeaders = headers.map((h) => normalizeHeader(h));
+
+      const findCol = (exactCandidates: string[], partialCandidates: string[], fallbackIdx: number) => {
+        const exactIdx = normHeaders.findIndex((nh) => exactCandidates.includes(nh));
+        if (exactIdx !== -1) return exactIdx;
+        const partialIdx = normHeaders.findIndex((nh) =>
+          partialCandidates.some((pc) => nh.includes(pc))
+        );
+        if (partialIdx !== -1) return partialIdx;
+        return fallbackIdx < headers.length ? fallbackIdx : 0;
       };
 
-      const idxEan = findCol(['ean', 'codigoean', 'codigo', 'codigobarras', 'barcode'], 0);
-      const idxRef = findCol(['referencia', 'ref', 'modelo', 'codigointerno'], 1);
-      const idxMarca = findCol(['marca', 'brand', 'fabricante'], 2);
-      const idxPreco = findCol(['preco', 'precovenda', 'valor'], 3);
-      const idxQtd = findCol(['quantidade', 'qtd', 'estoque', 'saldodisponivel', 'qtdestoque'], 4);
+      const idxEan = findCol(
+        ['ean', 'codigoean', 'codigobarras', 'barcode', 'gtin'],
+        ['ean', 'barra', 'barcode'],
+        0
+      );
+      const idxRef = findCol(
+        ['referencia', 'ref', 'modelo', 'codigointerno', 'sku'],
+        ['referencia', 'modelo', 'interno', 'sku'],
+        1
+      );
+      const idxMarca = findCol(
+        ['marca', 'brand', 'fabricante', 'grife'],
+        ['marca', 'brand', 'fabricante', 'grife'],
+        2
+      );
+      const idxPreco = findCol(
+        ['preco', 'precovenda', 'valor', 'precovendainicial'],
+        ['preco', 'valor'],
+        3
+      );
+      const idxQtd = findCol(
+        ['quantidade', 'qtd', 'estoque', 'saldodisponivel', 'qtdestoque', 'saldo'],
+        ['qtd', 'estoque', 'saldo'],
+        4
+      );
 
-      const consolidated = new Map<string, Omit<ExpectedProduct, 'id'>>();
+      setMappedInfo(
+        `Colunas detectadas — EAN: "${headers[idxEan]}" | Ref: "${headers[idxRef]}" | Marca: "${headers[idxMarca]}" | Preço: "${headers[idxPreco]}" | Qtd: "${headers[idxQtd]}"`
+      );
+
+      const consolidated = new Map<string, ExpectedProduct>();
       for (let i = 1; i < aoa.length; i++) {
         const row = aoa[i];
         if (!row || row.every((c) => String(c || '').trim() === '')) continue;
@@ -262,8 +302,15 @@ export default function InventoryPage() {
         }
       }
 
+      const entries = Array.from(consolidated.values());
+      const chunks: ExpectedProduct[][] = [];
+      for (let i = 0; i < entries.length; i += CHUNK_SIZE) {
+        chunks.push(entries.slice(i, i + CHUNK_SIZE));
+      }
+
+      // Remove blocos antigos da sessão atual
       const oldSnap = await getDocs(
-        query(collection(db, 'inventory_expected'), where('sessionId', '==', SESSION_ID))
+        query(collection(db, 'inventory_expected_blocks'), where('sessionId', '==', SESSION_ID))
       );
       const oldDocs = oldSnap.docs;
       for (let i = 0; i < oldDocs.length; i += 400) {
@@ -272,32 +319,45 @@ export default function InventoryPage() {
         await batch.commit();
       }
 
-      const entries = Array.from(consolidated.values());
-      for (let i = 0; i < entries.length; i += 400) {
+      // Grava os novos blocos em lotes de até 10 blocos por commit (evita limite de 10 MB por lote)
+      const BATCH_LIMIT = 10;
+      for (let i = 0; i < chunks.length; i += BATCH_LIMIT) {
+        const subChunks = chunks.slice(i, i + BATCH_LIMIT);
         const batch = writeBatch(db);
-        entries.slice(i, i + 400).forEach((item) => {
-          const refDoc = doc(collection(db, 'inventory_expected'));
+
+        subChunks.forEach((items, offset) => {
+          const blockIndex = i + offset;
+          const docId = `${SESSION_ID}_block_${String(blockIndex).padStart(4, '0')}`;
+          const refDoc = doc(db, 'inventory_expected_blocks', docId);
           batch.set(refDoc, {
             sessionId: SESSION_ID,
-            ...item,
+            blockIndex,
+            items,
+            updatedAt: serverTimestamp(),
           });
         });
+
         await batch.commit();
+        const doneCount = Math.min(entries.length, (i + BATCH_LIMIT) * CHUNK_SIZE);
+        setUploadProgress(`Sincronizando na nuvem: ${doneCount} de ${entries.length} produtos...`);
       }
 
+      setExpectedList(entries);
       setAlertMsg({
         type: 'success',
-        text: `Planilha carregada! ${entries.length} produtos únicos importados.`,
+        text: `Planilha carregada! ${entries.length} produtos únicos salvos em ${chunks.length} blocos.`,
       });
       setStep('scan');
-    } catch (err) {
-      console.error(err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Erro ao importar planilha:', err);
       setAlertMsg({
         type: 'error',
-        text: 'Erro ao ler a planilha. Verifique o formato (.xlsx ou .csv).',
+        text: `Erro ao importar planilha: ${msg}`,
       });
     } finally {
       setUploading(false);
+      setUploadProgress('');
       e.target.value = '';
     }
   };
@@ -578,6 +638,7 @@ export default function InventoryPage() {
               style={{ width: `${progressPct}%` }}
             />
           </div>
+          {mappedInfo && <p className="text-xs text-slate-400">{mappedInfo}</p>}
         </section>
 
         {alertMsg && (
@@ -607,8 +668,12 @@ export default function InventoryPage() {
             <h2 className="text-xl font-semibold">Passo 1: Enviar Planilha de Produtos do ERP</h2>
             <p className="text-sm text-slate-400 max-w-xl mx-auto">
               Selecione o arquivo (.xlsx ou .csv) contendo código EAN, referência, marca, preço e quantidade. Os
-              códigos serão preservados como texto e sincronizados com toda a equipe.
+              produtos são agrupados em blocos na nuvem para suportar grandes volumes sem estourar a cota do banco.
             </p>
+
+            {uploadProgress && (
+              <p className="text-sm font-medium text-emerald-400">{uploadProgress}</p>
+            )}
 
             <div className="pt-2">
               <label className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium cursor-pointer transition">
@@ -871,7 +936,7 @@ export default function InventoryPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/70">
-                  {filteredReport.map((r) => (
+                  {filteredReport.slice(0, 200).map((r) => (
                     <tr key={r.ean} className="hover:bg-slate-800/30">
                       <td className="py-2 px-3 font-mono">{r.ean}</td>
                       <td className="py-2 px-3">{r.referencia}</td>
