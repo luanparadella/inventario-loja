@@ -545,6 +545,22 @@ export default function InventoryPage() {
     scanInputRef.current?.focus();
   };
 
+  const handleDeleteCompletedNiche = async (nicheId: string, nicheName: string) => {
+    try {
+      await deleteDoc(doc(db, 'inventory_niches', nicheId));
+      setAlertMsg({
+        type: 'success',
+        text: `Registro do nicho "${nicheName}" removido.`,
+      });
+    } catch (err) {
+      console.error('Erro ao excluir nicho concluído:', err);
+      setAlertMsg({
+        type: 'error',
+        text: 'Erro ao remover o registro do nicho concluído.',
+      });
+    }
+  };
+
   const handleFinishAndNextNiche = async () => {
     const nicheLabel = (currentNiche || 'Nicho sem nome').trim();
     const actor = (operatorName || 'Operador').trim();
@@ -614,6 +630,15 @@ export default function InventoryPage() {
     for (const s of scans) {
       const key = normalizeCode(s.ean);
       if (!key) continue;
+      map.set(key, (map.get(key) || 0) + 1);
+    }
+    return map;
+  }, [scans]);
+
+  const scanCountByNiche = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const s of scans) {
+      const key = (s.nicheName || 'Geral').trim();
       map.set(key, (map.get(key) || 0) + 1);
     }
     return map;
@@ -768,14 +793,19 @@ export default function InventoryPage() {
   };
 
   const handleDownloadNichesExcel = () => {
-    const rows = completedNiches.map((n) => ({
-      Nicho: n.nicheName,
-      Responsavel: n.completedBy,
-      Bipados: n.countedScanned,
-      Contado_Manual: n.manualTarget ?? '',
-      Diferenca: n.diff ?? '',
-      Data_Hora: new Date(n.completedAtMs).toLocaleString('pt-BR'),
-    }));
+    const rows = completedNiches.map((n) => {
+      const currentNicheScans = scanCountByNiche.get(n.nicheName.trim()) || 0;
+      const currentDiff = n.manualTarget !== null ? currentNicheScans - n.manualTarget : '';
+      return {
+        Nicho: n.nicheName,
+        Responsavel: n.completedBy,
+        Bipados_Atuais: currentNicheScans,
+        Bipados_Fechamento: n.countedScanned,
+        Contado_Manual: n.manualTarget ?? '',
+        Diferenca_Atual: currentDiff,
+        Data_Hora: new Date(n.completedAtMs).toLocaleString('pt-BR'),
+      };
+    });
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Nichos_Concluidos');
@@ -1061,16 +1091,19 @@ export default function InventoryPage() {
                     Nichos concluídos (sincronizado)
                   </p>
                   <ul className="space-y-1.5 text-xs max-h-48 overflow-y-auto">
-                    {completedNiches.slice(0, 15).map((h) => (
-                      <li key={h.id} className="flex justify-between gap-2 text-slate-300">
-                        <span className="truncate">
-                          <strong className="text-white">{h.nicheName}</strong> • {h.completedBy}
-                        </span>
-                        <span className="shrink-0 text-emerald-400 font-medium">
-                          {h.countedScanned} un.
-                        </span>
-                      </li>
-                    ))}
+                    {completedNiches.slice(0, 15).map((h) => {
+                      const currentScansInNiche = scanCountByNiche.get(h.nicheName.trim()) || 0;
+                      return (
+                        <li key={h.id} className="flex justify-between gap-2 text-slate-300">
+                          <span className="truncate">
+                            <strong className="text-white">{h.nicheName}</strong> • {h.completedBy}
+                          </span>
+                          <span className="shrink-0 text-emerald-400 font-medium">
+                            {currentScansInNiche} un.
+                          </span>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               )}
@@ -1301,7 +1334,7 @@ export default function InventoryPage() {
                       Nichos Concluídos pela Equipe
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Registro automático de quem fechou cada nicho, quantidades e data/hora.
+                      Registro automático de quem fechou cada nicho, quantidades reais e data/hora.
                     </p>
                   </div>
                 </div>
@@ -1324,42 +1357,66 @@ export default function InventoryPage() {
                     <tr className="border-b border-slate-800 text-slate-400">
                       <th className="py-2.5 px-3">Nicho</th>
                       <th className="py-2.5 px-3">Quem Concluiu</th>
-                      <th className="py-2.5 px-3 text-right">Bipados</th>
+                      <th className="py-2.5 px-3 text-right">Bipados (Atual / Fechamento)</th>
                       <th className="py-2.5 px-3 text-right">Contado Manual</th>
-                      <th className="py-2.5 px-3 text-right">Diferença</th>
+                      <th className="py-2.5 px-3 text-right">Diferença Atual</th>
                       <th className="py-2.5 px-3 text-right">Concluído em</th>
+                      <th className="py-2.5 px-3 text-right">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/70">
-                    {completedNiches.map((n) => (
-                      <tr key={n.id} className="hover:bg-slate-800/30">
-                        <td className="py-2 px-3 font-semibold text-white">{n.nicheName}</td>
-                        <td className="py-2 px-3 text-slate-300">{n.completedBy}</td>
-                        <td className="py-2 px-3 text-right font-semibold text-emerald-400">
-                          {n.countedScanned}
-                        </td>
-                        <td className="py-2 px-3 text-right text-slate-300">
-                          {n.manualTarget !== null ? n.manualTarget : '-'}
-                        </td>
-                        <td
-                          className={`py-2 px-3 text-right font-bold ${
-                            n.diff === null
-                              ? 'text-slate-500'
-                              : n.diff === 0
-                              ? 'text-emerald-400'
-                              : 'text-amber-400'
-                          }`}
-                        >
-                          {n.diff === null ? '-' : n.diff > 0 ? `+${n.diff}` : n.diff}
-                        </td>
-                        <td className="py-2 px-3 text-right text-xs text-slate-400">
-                          {new Date(n.completedAtMs).toLocaleString('pt-BR')}
-                        </td>
-                      </tr>
-                    ))}
+                    {completedNiches.map((n) => {
+                      const currentNicheScans = scanCountByNiche.get(n.nicheName.trim()) || 0;
+                      const currentDiff =
+                        n.manualTarget !== null ? currentNicheScans - n.manualTarget : null;
+
+                      return (
+                        <tr key={n.id} className="hover:bg-slate-800/30">
+                          <td className="py-2 px-3 font-semibold text-white">{n.nicheName}</td>
+                          <td className="py-2 px-3 text-slate-300">{n.completedBy}</td>
+                          <td className="py-2 px-3 text-right font-semibold text-emerald-400">
+                            {currentNicheScans}{' '}
+                            <span className="text-xs font-normal text-slate-500">
+                              (fechou com {n.countedScanned})
+                            </span>
+                          </td>
+                          <td className="py-2 px-3 text-right text-slate-300">
+                            {n.manualTarget !== null ? n.manualTarget : '-'}
+                          </td>
+                          <td
+                            className={`py-2 px-3 text-right font-bold ${
+                              currentDiff === null
+                                ? 'text-slate-500'
+                                : currentDiff === 0
+                                ? 'text-emerald-400'
+                                : 'text-amber-400'
+                            }`}
+                          >
+                            {currentDiff === null
+                              ? '-'
+                              : currentDiff > 0
+                              ? `+${currentDiff}`
+                              : currentDiff}
+                          </td>
+                          <td className="py-2 px-3 text-right text-xs text-slate-400">
+                            {new Date(n.completedAtMs).toLocaleString('pt-BR')}
+                          </td>
+                          <td className="py-2 px-3 text-right">
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteCompletedNiche(n.id, n.nicheName)}
+                              title="Excluir registro deste nicho"
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-950/50 transition"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {completedNiches.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="py-6 text-center text-slate-500 text-sm">
+                        <td colSpan={7} className="py-6 text-center text-slate-500 text-sm">
                           Nenhum nicho concluído ainda.
                         </td>
                       </tr>
