@@ -7,7 +7,6 @@ import {
   addDoc,
   deleteDoc,
   doc,
-  setDoc,
   onSnapshot,
   query,
   where,
@@ -33,10 +32,20 @@ import { db } from '@/lib/firebase';
 
 interface ExpectedProduct {
   ean: string;
+  codigoInterno: string;
   referencia: string;
   marca: string;
   preco: number;
   expectedQty: number;
+}
+
+interface CompactProduct {
+  e: string;
+  i: string;
+  r: string;
+  m: string;
+  p: number;
+  q: number;
 }
 
 interface ScanRecord {
@@ -54,7 +63,8 @@ interface NicheHistoryItem {
 }
 
 const SESSION_ID = 'sessao-ativa-loja';
-const CHUNK_SIZE = 500;
+const CHUNK_SIZE = 75;
+const BATCH_LIMIT = 3;
 
 function normalizeHeader(h: string) {
   return String(h || '')
@@ -142,15 +152,22 @@ export default function InventoryPage() {
         snap.docs.forEach((d) => {
           const data = d.data();
           if (Array.isArray(data.items)) {
+            const expanded: ExpectedProduct[] = (data.items as CompactProduct[]).map((c) => ({
+              ean: String(c.e || ''),
+              codigoInterno: String(c.i || ''),
+              referencia: String(c.r || ''),
+              marca: String(c.m || 'Sem Marca'),
+              preco: Number(c.p || 0),
+              expectedQty: Number(c.q || 0),
+            }));
             blocks.push({
               blockIndex: Number(data.blockIndex ?? 0),
-              items: data.items as ExpectedProduct[],
+              items: expanded,
             });
           }
         });
         blocks.sort((a, b) => a.blockIndex - b.blockIndex);
-        const flat = blocks.flatMap((b) => b.items);
-        setExpectedList(flat);
+        setExpectedList(blocks.flatMap((b) => b.items));
       },
       (err) => {
         console.error('Erro no listener de blocos ERP:', err);
@@ -239,34 +256,39 @@ export default function InventoryPage() {
         return fallbackIdx < headers.length ? fallbackIdx : 0;
       };
 
-      const idxEan = findCol(
-        ['ean', 'codigoean', 'codigobarras', 'barcode', 'gtin'],
-        ['ean', 'barra', 'barcode'],
-        0
-      );
       const idxRef = findCol(
-        ['referencia', 'ref', 'modelo', 'codigointerno', 'sku'],
-        ['referencia', 'modelo', 'interno', 'sku'],
-        1
+        ['referenciamodelo', 'referencia', 'ref', 'modelo'],
+        ['referencia', 'modelo'],
+        0
       );
       const idxMarca = findCol(
         ['marca', 'brand', 'fabricante', 'grife'],
         ['marca', 'brand', 'fabricante', 'grife'],
+        1
+      );
+      const idxInterno = findCol(
+        ['codigointerno', 'codigo', 'codigoproduto', 'sku'],
+        ['interno', 'sku'],
         2
       );
-      const idxPreco = findCol(
-        ['preco', 'precovenda', 'valor', 'precovendainicial'],
-        ['preco', 'valor'],
+      const idxQtd = findCol(
+        ['saldodisponivel', 'quantidade', 'qtd', 'estoque', 'saldo'],
+        ['saldo', 'qtd', 'estoque'],
         3
       );
-      const idxQtd = findCol(
-        ['quantidade', 'qtd', 'estoque', 'saldodisponivel', 'qtdestoque', 'saldo'],
-        ['qtd', 'estoque', 'saldo'],
-        4
+      const idxPreco = findCol(
+        ['precovenda', 'preco', 'precovendainicial', 'valor'],
+        ['precovenda', 'preco', 'valor'],
+        5
+      );
+      const idxEan = findCol(
+        ['codigoean', 'ean', 'codigobarras', 'barcode', 'gtin'],
+        ['ean', 'barra', 'barcode'],
+        6
       );
 
       setMappedInfo(
-        `Colunas detectadas — EAN: "${headers[idxEan]}" | Ref: "${headers[idxRef]}" | Marca: "${headers[idxMarca]}" | Preço: "${headers[idxPreco]}" | Qtd: "${headers[idxQtd]}"`
+        `Colunas detectadas — Ref: "${headers[idxRef]}" | Marca: "${headers[idxMarca]}" | Cód. Interno: "${headers[idxInterno]}" | Saldo: "${headers[idxQtd]}" | Preço: "${headers[idxPreco]}" | EAN: "${headers[idxEan]}"`
       );
 
       const consolidated = new Map<string, ExpectedProduct>();
@@ -274,26 +296,29 @@ export default function InventoryPage() {
         const row = aoa[i];
         if (!row || row.every((c) => String(c || '').trim() === '')) continue;
 
+        const codigoInterno = String(row[idxInterno] ?? '').replace(/\s+/g, '').trim();
         const ean = String(row[idxEan] ?? '').replace(/\s+/g, '').trim();
-        if (!ean) continue;
+        const key = codigoInterno || ean || `linha_${i + 1}`;
 
         const referencia = String(row[idxRef] ?? '').trim();
         const marca = String(row[idxMarca] ?? '').trim() || 'Sem Marca';
         const preco = parseNumberBR(row[idxPreco]);
         const qty = Math.trunc(parseNumberBR(row[idxQtd]));
 
-        if (consolidated.has(ean)) {
-          const prev = consolidated.get(ean)!;
-          consolidated.set(ean, {
+        if (consolidated.has(key)) {
+          const prev = consolidated.get(key)!;
+          consolidated.set(key, {
             ...prev,
             expectedQty: prev.expectedQty + qty,
+            ean: prev.ean || ean,
             referencia: prev.referencia || referencia,
             marca: prev.marca !== 'Sem Marca' ? prev.marca : marca,
             preco: prev.preco || preco,
           });
         } else {
-          consolidated.set(ean, {
+          consolidated.set(key, {
             ean,
+            codigoInterno,
             referencia,
             marca,
             preco,
@@ -303,12 +328,20 @@ export default function InventoryPage() {
       }
 
       const entries = Array.from(consolidated.values());
-      const chunks: ExpectedProduct[][] = [];
-      for (let i = 0; i < entries.length; i += CHUNK_SIZE) {
-        chunks.push(entries.slice(i, i + CHUNK_SIZE));
+      const compactEntries: CompactProduct[] = entries.map((item) => ({
+        e: item.ean,
+        i: item.codigoInterno,
+        r: item.referencia,
+        m: item.marca,
+        p: item.preco,
+        q: item.expectedQty,
+      }));
+
+      const chunks: CompactProduct[][] = [];
+      for (let i = 0; i < compactEntries.length; i += CHUNK_SIZE) {
+        chunks.push(compactEntries.slice(i, i + CHUNK_SIZE));
       }
 
-      // Remove blocos antigos da sessão atual
       const oldSnap = await getDocs(
         query(collection(db, 'inventory_expected_blocks'), where('sessionId', '==', SESSION_ID))
       );
@@ -319,8 +352,6 @@ export default function InventoryPage() {
         await batch.commit();
       }
 
-      // Grava os novos blocos em lotes de até 10 blocos por commit (evita limite de 10 MB por lote)
-      const BATCH_LIMIT = 10;
       for (let i = 0; i < chunks.length; i += BATCH_LIMIT) {
         const subChunks = chunks.slice(i, i + BATCH_LIMIT);
         const batch = writeBatch(db);
@@ -333,7 +364,6 @@ export default function InventoryPage() {
             sessionId: SESSION_ID,
             blockIndex,
             items,
-            updatedAt: serverTimestamp(),
           });
         });
 
@@ -345,7 +375,7 @@ export default function InventoryPage() {
       setExpectedList(entries);
       setAlertMsg({
         type: 'success',
-        text: `Planilha carregada! ${entries.length} produtos únicos salvos em ${chunks.length} blocos.`,
+        text: `Planilha carregada! ${entries.length} produtos importados em ${chunks.length} blocos.`,
       });
       setStep('scan');
     } catch (err: unknown) {
@@ -500,32 +530,66 @@ export default function InventoryPage() {
   }, [scans]);
 
   const consolidatedReport = useMemo(() => {
-    const allEans = new Set<string>([
-      ...expectedList.map((e) => e.ean),
-      ...scans.map((s) => s.ean),
-    ]);
+    const map = new Map<
+      string,
+      {
+        key: string;
+        ean: string;
+        codigoInterno: string;
+        referencia: string;
+        marca: string;
+        preco: number;
+        expectedQty: number;
+        scannedQty: number;
+      }
+    >();
 
-    const expectedMap = new Map(expectedList.map((e) => [e.ean, e]));
+    for (const exp of expectedList) {
+      const key = exp.codigoInterno || exp.ean || `${exp.referencia}_${exp.marca}`;
+      const existing = map.get(key);
+      if (existing) {
+        existing.expectedQty += exp.expectedQty;
+        if (!existing.ean && exp.ean) existing.ean = exp.ean;
+      } else {
+        const scannedQty = exp.ean ? scanCountByEan.get(exp.ean) || 0 : 0;
+        map.set(key, {
+          key,
+          ean: exp.ean,
+          codigoInterno: exp.codigoInterno,
+          referencia: exp.referencia,
+          marca: exp.marca,
+          preco: exp.preco,
+          expectedQty: exp.expectedQty,
+          scannedQty,
+        });
+      }
+    }
 
-    return Array.from(allEans).map((ean) => {
-      const exp = expectedMap.get(ean);
-      const scannedQty = scanCountByEan.get(ean) || 0;
-      const expectedQty = exp ? exp.expectedQty : 0;
-      const diff = scannedQty - expectedQty;
-      const preco = exp ? exp.preco : 0;
+    for (const [ean, scannedQty] of scanCountByEan.entries()) {
+      const alreadyMatched = Array.from(map.values()).some((item) => item.ean === ean);
+      if (!alreadyMatched) {
+        map.set(`unlisted_${ean}`, {
+          key: `unlisted_${ean}`,
+          ean,
+          codigoInterno: '-',
+          referencia: 'NÃO CADASTRADO NO ERP',
+          marca: 'Sem Marca',
+          preco: 0,
+          expectedQty: 0,
+          scannedQty,
+        });
+      }
+    }
 
+    return Array.from(map.values()).map((r) => {
+      const diff = r.scannedQty - r.expectedQty;
       return {
-        ean,
-        referencia: exp ? exp.referencia : 'NÃO CADASTRADO NO ERP',
-        marca: exp ? exp.marca : 'Sem Marca',
-        preco,
-        expectedQty,
-        scannedQty,
+        ...r,
         diff,
-        financialDiff: diff * preco,
+        financialDiff: diff * r.preco,
       };
     });
-  }, [expectedList, scans, scanCountByEan]);
+  }, [expectedList, scanCountByEan]);
 
   const brands = useMemo(() => {
     const set = new Set(consolidatedReport.map((r) => r.marca));
@@ -557,6 +621,7 @@ export default function InventoryPage() {
 
   const handleDownloadExcel = () => {
     const rows = consolidatedReport.map((r) => ({
+      Codigo_Interno: r.codigoInterno,
       EAN: r.ean,
       Referencia: r.referencia,
       Marca: r.marca,
@@ -667,8 +732,8 @@ export default function InventoryPage() {
             </div>
             <h2 className="text-xl font-semibold">Passo 1: Enviar Planilha de Produtos do ERP</h2>
             <p className="text-sm text-slate-400 max-w-xl mx-auto">
-              Selecione o arquivo (.xlsx ou .csv) contendo código EAN, referência, marca, preço e quantidade. Os
-              produtos são agrupados em blocos na nuvem para suportar grandes volumes sem estourar a cota do banco.
+              Selecione o arquivo (.xlsx ou .csv) contendo Referência/Modelo, Marca, CodigoInterno, SaldoDisponivel,
+              Preço Venda e Código EAN. Os itens são enviados em blocos compactos para o Firestore.
             </p>
 
             {uploadProgress && (
@@ -926,6 +991,7 @@ export default function InventoryPage() {
               <table className="w-full text-left border-collapse text-sm">
                 <thead>
                   <tr className="border-b border-slate-800 text-slate-400">
+                    <th className="py-2.5 px-3">Cód. Interno</th>
                     <th className="py-2.5 px-3">EAN</th>
                     <th className="py-2.5 px-3">Referência</th>
                     <th className="py-2.5 px-3">Marca</th>
@@ -937,8 +1003,9 @@ export default function InventoryPage() {
                 </thead>
                 <tbody className="divide-y divide-slate-800/70">
                   {filteredReport.slice(0, 200).map((r) => (
-                    <tr key={r.ean} className="hover:bg-slate-800/30">
-                      <td className="py-2 px-3 font-mono">{r.ean}</td>
+                    <tr key={r.key} className="hover:bg-slate-800/30">
+                      <td className="py-2 px-3 font-mono text-xs text-slate-300">{r.codigoInterno}</td>
+                      <td className="py-2 px-3 font-mono">{r.ean || '-'}</td>
                       <td className="py-2 px-3">{r.referencia}</td>
                       <td className="py-2 px-3">{r.marca}</td>
                       <td className="py-2 px-3 text-right">R$ {r.preco.toFixed(2)}</td>
