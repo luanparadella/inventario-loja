@@ -397,11 +397,11 @@ export default function InventoryPage() {
     const code = eanInput.trim();
     if (!code) return;
 
-    if (!/^\d{13}$/.test(code)) {
+    if (!/^\d{12,13}$/.test(code)) {
       playTone('error');
       setAlertMsg({
         type: 'error',
-        text: `Código inválido ("${code}")! O padrão exigido é EAN-13 (13 dígitos numéricos). Não foi contabilizado.`,
+        text: `Código inválido ("${code}")! O código deve conter 12 ou 13 dígitos numéricos. Não foi contabilizado.`,
       });
       setEanInput('');
       scanInputRef.current?.focus();
